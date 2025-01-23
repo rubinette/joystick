@@ -1,219 +1,117 @@
+//go:build windows
 // +build windows
 
 package joystick
 
 import (
 	"fmt"
-	"golang.org/x/sys/windows"
-	"math"
 	"unsafe"
-)
 
-var PrintFunc func(x, y int, s string)
+	"golang.org/x/sys/windows"
+)
 
 const (
-	_MAXPNAMELEN            = 32
-	_MAX_JOYSTICKOEMVXDNAME = 260
-	_MAX_AXIS               = 6
-
-	_JOY_RETURNX        = 1
-	_JOY_RETURNY        = 2
-	_JOY_RETURNZ        = 4
-	_JOY_RETURNR        = 8
-	_JOY_RETURNU        = 16
-	_JOY_RETURNV        = 32
-	_JOY_RETURNPOV      = 64
-	_JOY_RETURNBUTTONS  = 128
-	_JOY_RETURNRAWDATA  = 256
-	_JOY_RETURNPOVCTS   = 512
-	_JOY_RETURNCENTERED = 1024
-	_JOY_USEDEADZONE    = 2048
-	_JOY_RETURNALL      = (_JOY_RETURNX | _JOY_RETURNY | _JOY_RETURNZ | _JOY_RETURNR | _JOY_RETURNU | _JOY_RETURNV | _JOY_RETURNPOV | _JOY_RETURNBUTTONS)
-
-	_JOYCAPS_HASZ    = 0x1
-	_JOYCAPS_HASR    = 0x2
-	_JOYCAPS_HASU    = 0x4
-	_JOYCAPS_HASV    = 0x8
-	_JOYCAPS_HASPOV  = 0x10
-	_JOYCAPS_POV4DIR = 0x20
-	_JOYCAPS_POVCTS  = 0x40
+	// XINPUT_DEADZONE_LEFT_THUMB Deadzone for the Left Thumb Stick (-32767 to 32767)
+	XINPUT_DEADZONE_LEFT_THUMB = 7849
+	// XINPUT_DEADZONE_RIGHT_THUMB Deadzone for the Right Thumb Stick (-32767 to 32767)
+	XINPUT_DEADZONE_RIGHT_THUMB = 8689
+	// TRIGGER_TRESHOLD Threshold for the left and right triggers (0 to 255)
+	XINPUT_DEADZONE_TRIGGER = 30
 )
 
-type JOYCAPS struct {
-	wMid        uint16
-	wPid        uint16
-	szPname     [_MAXPNAMELEN]uint16
-	wXmin       uint32
-	wXmax       uint32
-	wYmin       uint32
-	wYmax       uint32
-	wZmin       uint32
-	wZmax       uint32
-	wNumButtons uint32
-	wPeriodMin  uint32
-	wPeriodMax  uint32
-	wRmin       uint32
-	wRmax       uint32
-	wUmin       uint32
-	wUmax       uint32
-	wVmin       uint32
-	wVmax       uint32
-	wCaps       uint32
-	wMaxAxes    uint32
-	wNumAxes    uint32
-	wMaxButtons uint32
-	szRegKey    [_MAXPNAMELEN]uint16
-	szOEMVxD    [_MAX_JOYSTICKOEMVXDNAME]uint16
+type XInputState struct {
+	PacketNumber uint32
+	Gamepad      XInputGamepad
 }
 
-type JOYINFOEX struct {
-	dwSize         uint32
-	dwFlags        uint32
-	dwAxis         [_MAX_AXIS]uint32
-	dwButtons      uint32
-	dwButtonNumber uint32
-	dwPOV          uint32
-	dwReserved1    uint32
-	dwReserved2    uint32
-}
-
-var (
-	winmmdll      = windows.MustLoadDLL("Winmm.dll")
-	joyGetPosEx   = winmmdll.MustFindProc("joyGetPosEx")
-	joyGetDevCaps = winmmdll.MustFindProc("joyGetDevCapsW")
-)
-
-type axisLimit struct {
-	min, max uint32
+type XInputGamepad struct {
+	Buttons      uint16
+	LeftTrigger  uint8
+	RightTrigger uint8
+	ThumbLX      int16
+	ThumbLY      int16
+	ThumbRX      int16
+	ThumbRY      int16
 }
 
 type joystickImpl struct {
-	id           int
-	axisCount    int
-	povAxisCount int
-	buttonCount  int
-	name         string
-	state        State
-	axisLimits   []axisLimit
+	id     int
+	state  XInputState
+	button int
+	axes   []float64
 }
 
-func mapValue(val, srcMin, srcMax, dstMin, dstMax int64) int64 {
-	return (val-srcMin)*(dstMax-dstMin)/(srcMax-srcMin) + dstMin
-}
+var (
+	xinputDLL      = windows.MustLoadDLL("xinput1_4.dll") // Use xinput1_4 (available on Windows 8+)
+	xinputGetState = xinputDLL.MustFindProc("XInputGetState")
+	xinputSetState = xinputDLL.MustFindProc("XInputSetState")
+	xinputEnable   = xinputDLL.MustFindProc("XInputEnable")
+)
 
-// Open opens the Joystick for reading, with the supplied id
-//
-// Under linux the id is used to construct the joystick device name:
-//   for example: id 0 will open device: "/dev/input/js0"
-//
-// Under Windows the id is the actual numeric id of the joystick
-//
-// If successful, a Joystick interface is returned which can be used to
-// read the state of the joystick, else an error is returned
 func Open(id int) (Joystick, error) {
-
-	js := &joystickImpl{}
-	js.id = id
-
-	err := js.getJoyCaps()
-	if err == nil {
-		return js, nil
+	if id < 0 || id > 3 {
+		return nil, fmt.Errorf("invalid joystick id: %d", id)
 	}
-	return nil, err
-}
-
-func (js *joystickImpl) getJoyCaps() error {
-	var caps JOYCAPS
-	ret, _, _ := joyGetDevCaps.Call(uintptr(js.id), uintptr(unsafe.Pointer(&caps)), unsafe.Sizeof(caps))
-
-	if ret != 0 {
-		return fmt.Errorf("Failed to read Joystick %d", js.id)
-	} else {
-		js.axisCount = int(caps.wNumAxes)
-		js.buttonCount = int(caps.wNumButtons)
-		js.name = windows.UTF16ToString(caps.szPname[:])
-
-		if caps.wCaps&_JOYCAPS_HASPOV != 0 {
-			js.povAxisCount = 2
-		}
-
-		js.state.AxisData = make([]int, js.axisCount+js.povAxisCount, js.axisCount+js.povAxisCount)
-
-		js.axisLimits = []axisLimit{
-			{caps.wXmin, caps.wXmax},
-			{caps.wYmin, caps.wYmax},
-			{caps.wZmin, caps.wZmax},
-			{caps.wRmin, caps.wRmax},
-			{caps.wUmin, caps.wUmax},
-			{caps.wVmin, caps.wVmax},
-		}
-
-		return nil
-	}
-}
-
-func axisFromPov(povVal float64) int {
-	switch {
-	case povVal < -0.5:
-		return -32767
-	case povVal > 0.5:
-		return 32768
-	default:
-		return 0
-	}
-}
-
-func (js *joystickImpl) getJoyPosEx() error {
-	var info JOYINFOEX
-	info.dwSize = uint32(unsafe.Sizeof(info))
-	info.dwFlags = _JOY_RETURNALL
-	ret, _, _ := joyGetPosEx.Call(uintptr(js.id), uintptr(unsafe.Pointer(&info)))
-
-	if ret != 0 {
-		return fmt.Errorf("Failed to read Joystick %d", js.id)
-	} else {
-		js.state.Buttons = info.dwButtons
-
-		for i := 0; i < js.axisCount; i++ {
-			js.state.AxisData[i] = int(mapValue(int64(info.dwAxis[i]),
-				int64(js.axisLimits[i].min), int64(js.axisLimits[i].max), -32767, 32768))
-		}
-
-		if js.povAxisCount > 0 {
-			angleDeg := float64(info.dwPOV) / 100.0
-			if angleDeg > 359.0 {
-				js.state.AxisData[js.axisCount] = 0
-				js.state.AxisData[js.axisCount+1] = 0
-				return nil
-			}
-
-			angleRad := angleDeg * math.Pi / 180.0
-			sin, cos := math.Sincos(angleRad)
-
-			js.state.AxisData[js.axisCount] = axisFromPov(sin)
-			js.state.AxisData[js.axisCount+1] = axisFromPov(-cos)
-		}
-		return nil
-	}
-}
-
-func (js *joystickImpl) AxisCount() int {
-	return js.axisCount + js.povAxisCount
-}
-
-func (js *joystickImpl) ButtonCount() int {
-	return js.buttonCount
-}
-
-func (js *joystickImpl) Name() string {
-	return js.name
+	return &joystickImpl{id: id}, nil
 }
 
 func (js *joystickImpl) Read() (State, error) {
-	err := js.getJoyPosEx()
-	return js.state, err
+	ret, _, _ := xinputGetState.Call(uintptr(js.id), uintptr(unsafe.Pointer(&js.state)))
+	if ret != 0 {
+		return State{}, fmt.Errorf("joystick %d is not connected", js.id)
+	}
+
+	gamepad := js.state.Gamepad
+	state := State{
+		Buttons: uint32(gamepad.Buttons),
+		AxisData: []int{
+			applyDeadzone(int(gamepad.ThumbLX), XINPUT_DEADZONE_LEFT_THUMB),
+			applyDeadzone(int(gamepad.ThumbLY), XINPUT_DEADZONE_LEFT_THUMB),
+			applyDeadzone(int(gamepad.ThumbRX), XINPUT_DEADZONE_RIGHT_THUMB),
+			applyDeadzone(int(gamepad.ThumbRY), XINPUT_DEADZONE_RIGHT_THUMB),
+			applyTriggerDeadzone(int(gamepad.LeftTrigger), XINPUT_DEADZONE_TRIGGER),
+			applyTriggerDeadzone(int(gamepad.RightTrigger), XINPUT_DEADZONE_TRIGGER),
+		},
+	}
+	return state, nil
+}
+
+func applyDeadzone(value int, deadzone int) int {
+	if value > deadzone {
+		return scaleValue(value, deadzone, 32767)
+	} else if value < -deadzone {
+		return scaleValue(value, -deadzone, -32767)
+	}
+	return 0
+}
+
+func applyTriggerDeadzone(value int, deadzone int) int {
+	if value > deadzone {
+		return scaleValue(value, deadzone, 255)
+	}
+	return 0
+}
+
+func scaleValue(value, srcMin, srcMax int) int {
+	srcRange := srcMax - srcMin
+	if srcRange == 0 {
+		return 0
+	}
+	return (value - srcMin) * srcMax / (srcMax - srcMin)
 }
 
 func (js *joystickImpl) Close() {
-	// no impl under windows
+	// No cleanup needed for XInput
+}
+
+func (js *joystickImpl) AxisCount() int {
+	return 6 // Two thumbsticks (2x2) + two triggers
+}
+
+func (js *joystickImpl) ButtonCount() int {
+	return 32 // Includes A, B, X, Y, Start, Back, etc.
+}
+
+func (js *joystickImpl) Name() string {
+	return fmt.Sprintf("XInput Controller %d", js.id)
 }

@@ -9,19 +9,21 @@ Package requires no external dependencies to be installed.
 
 Mac OSX code developed by:  https://github.com/ledyba
 
+Windows platform has now switched to using XInput for implementation
+
 ## Installation:
 ```bash
-$ go get github.com/0xcafed00d/joystick/...
+$ go get github.com/rubinette/joystick/...
 ```
 ## Sample Program 
 ```bash
-$ go install github.com/0xcafed00d/joystick/joysticktest
+$ go install github.com/rubinette/joystick/joysticktest
 $ joysticktest 0
 ```
 Displays the state of the specified joystick
 ## Example:
 ```go
-import "github.com/0xcafed00d/joystick"
+import "github.com/rubinette/joystick"
 ```
 ```go
 js, err := joystick.Open(jsid)
