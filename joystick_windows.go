@@ -35,10 +35,12 @@ type XInputGamepad struct {
 }
 
 type joystickImpl struct {
-	id     int
-	state  XInputState
-	button int
-	axes   []float64
+	id          int
+	axisCount   int
+	buttonCount int
+	state       XInputState
+	button      int
+	axes        []float64
 }
 
 var (
@@ -52,7 +54,7 @@ func Open(id int) (Joystick, error) {
 	if id < 0 || id > 3 {
 		return nil, fmt.Errorf("invalid joystick id: %d", id)
 	}
-	return &joystickImpl{id: id}, nil
+	return &joystickImpl{id: id, axisCount: 6, buttonCount: 16}, nil
 }
 
 func (js *joystickImpl) Read() (State, error) {
@@ -78,26 +80,33 @@ func (js *joystickImpl) Read() (State, error) {
 
 func applyDeadzone(value int, deadzone int) int {
 	if value > deadzone {
-		return scaleValue(value, deadzone, 32767)
+		return scaleValue(value, deadzone, 32767, 0, 32767)
 	} else if value < -deadzone {
-		return scaleValue(value, -deadzone, -32767)
+		return scaleValue(value, -32767, -deadzone, -32767, 0)
 	}
 	return 0
 }
 
 func applyTriggerDeadzone(value int, deadzone int) int {
 	if value > deadzone {
-		return scaleValue(value, deadzone, 255)
+		return scaleValue(value, deadzone, 255, 0, 255)
 	}
 	return 0
 }
 
-func scaleValue(value, srcMin, srcMax int) int {
+func scaleValue(value, srcMin, srcMax, tgtMin, tgtMax int) int {
+	// Handle edge case: zero source range
 	srcRange := srcMax - srcMin
 	if srcRange == 0 {
-		return 0
+		panic("source range cannot be zero")
 	}
-	return (value - srcMin) * srcMax / (srcMax - srcMin)
+
+	tgtRange := tgtMax - tgtMin
+
+	// Scale the value
+	scaledValue := (value-srcMin)*tgtRange/srcRange + tgtMin
+
+	return scaledValue
 }
 
 func (js *joystickImpl) Close() {
@@ -105,11 +114,11 @@ func (js *joystickImpl) Close() {
 }
 
 func (js *joystickImpl) AxisCount() int {
-	return 6 // Two thumbsticks (2x2) + two triggers
+	return js.axisCount // Two thumbsticks (2x2) + two triggers
 }
 
 func (js *joystickImpl) ButtonCount() int {
-	return 32 // Includes A, B, X, Y, Start, Back, etc.
+	return js.buttonCount // Includes A, B, X, Y, Start, Back, etc.
 }
 
 func (js *joystickImpl) Name() string {
